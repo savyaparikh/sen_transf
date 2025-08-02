@@ -246,21 +246,56 @@ def run_analysis(main_file_path, instance_file_path=None,
         except Exception as e:
             log_message(f"Could not load local Sentence Transformers model: {e}. Falling back to TF-IDF.")
 
+        # Enhanced instance texts with training data
+        instance_name_training = training_data.get('instance_name', pd.DataFrame())
+        
+        # Create enriched instance profiles
+        instance_enriched_texts = []
+        for i, (name, text) in enumerate(zip(instance_names, instance_texts)):
+            enriched_text = text
+            
+            # Add training examples if available
+            if not instance_name_training.empty and name in instance_name_training["DQ Check Instance Name"].values:
+                # Get all training descriptions for this instance name
+                training_examples = instance_name_training[
+                    instance_name_training["DQ Check Instance Name"] == name
+                ]["Activity (DQ Check Description)"].tolist()
+                
+                if training_examples:
+                    # Add up to 5 training examples to enrich the instance profile
+                    examples_text = " EXAMPLES: " + " | ".join(training_examples[:5])
+                    enriched_text = text + examples_text
+                    if i < 5:  # Log first few enrichments
+                        log_message(f"Enriched instance '{name}' with {len(training_examples)} training examples")
+            
+            instance_enriched_texts.append(enriched_text)
+        
         descs = df["Activity (DQ Check Description)"].fillna("").tolist()
         top3_instance_names = []
         top3_confidences = []
         
         if use_sentence_transformers:
-            # Compute embeddings for all instance profiles and descriptions
-            instance_embs = model_st.encode(instance_texts, convert_to_tensor=True, show_progress_bar=False)
+            # Compute embeddings for enriched instance profiles and descriptions
+            log_message("Computing sentence embeddings for enriched instance profiles...")
+            instance_embs = model_st.encode(instance_enriched_texts, convert_to_tensor=True, show_progress_bar=False)
             desc_embs = model_st.encode(descs, convert_to_tensor=True, show_progress_bar=False)
+            
             for desc_emb in desc_embs:
                 sims = st_util.pytorch_cos_sim(desc_emb, instance_embs).cpu().numpy().flatten()
                 n_instances = len(instance_names)
                 top_k = min(3, n_instances)
                 top_idx = sims.argsort()[-top_k:][::-1] if n_instances > 0 else []
                 names = [instance_names[i] for i in top_idx]
-                confs = [round(float(sims[i])*100, 2) for i in top_idx]
+                # Boost confidence if training data was used
+                confs = []
+                for idx in top_idx:
+                    base_conf = float(sims[idx])
+                    # If this instance had training examples, boost confidence slightly
+                    if instance_enriched_texts[idx] != instance_texts[idx]:  # Was enriched
+                        boost = min(0.1, base_conf * 0.15)  # Up to 15% boost, max 0.1
+                        confs.append(round((base_conf + boost) * 100, 2))
+                    else:
+                        confs.append(round(base_conf * 100, 2))
                 # Pad to length 3
                 while len(names) < 3:
                     names.append("")
@@ -268,18 +303,30 @@ def run_analysis(main_file_path, instance_file_path=None,
                 top3_instance_names.append(names)
                 top3_confidences.append(confs)
         else:
+            # TF-IDF approach with enriched texts
+            log_message("Using TF-IDF with enriched instance profiles...")
             vectorizer = TfidfVectorizer(ngram_range=(1, 3))
-            all_texts = descs + instance_texts
+            all_texts = descs + instance_enriched_texts
             tfidf_matrix = vectorizer.fit_transform(all_texts)
             desc_vectors = tfidf_matrix[:len(descs)]
             instance_vectors = tfidf_matrix[len(descs):]
             n_instances = len(instance_names)
+            
             for desc_vec in desc_vectors:
                 sims = cosine_similarity(desc_vec, instance_vectors).flatten() if n_instances > 0 else []
                 top_k = min(3, n_instances)
                 top_idx = sims.argsort()[-top_k:][::-1] if n_instances > 0 else []
                 names = [instance_names[i] for i in top_idx]
-                confs = [round(sims[i]*100, 2) for i in top_idx]
+                # Boost confidence if training data was used
+                confs = []
+                for idx in top_idx:
+                    base_conf = sims[idx]
+                    # If this instance had training examples, boost confidence slightly
+                    if instance_enriched_texts[idx] != instance_texts[idx]:  # Was enriched
+                        boost = min(0.1, base_conf * 0.15)  # Up to 15% boost, max 0.1
+                        confs.append(round((base_conf + boost) * 100, 2))
+                    else:
+                        confs.append(round(base_conf * 100, 2))
                 # Pad to length 3
                 while len(names) < 3:
                     names.append("")
@@ -391,9 +438,9 @@ def run_analysis(main_file_path, instance_file_path=None,
             df["Top3_DQ_Check_Instance_Name"].fillna('')
         )
         df["Top3_Instance_Confidences_Combined"] = (
-            df["Top1_Instance_Confidence"].astype(str).fillna('') + " | " +
-            df["Top2_Instance_Confidence"].astype(str).fillna('') + " | " +
-            df["Top3_Instance_Confidence"].astype(str).fillna('')
+            df["Top1_Instance_Confidence"].astype(str) + " | " +
+            df["Top2_Instance_Confidence"].astype(str) + " | " +
+            df["Top3_Instance_Confidence"].astype(str)
         )
 
         update_progress(50, "Training instance model...")
@@ -809,6 +856,9 @@ def run_analysis(main_file_path, instance_file_path=None,
 
         # Rest of the original code continues...
         # Create result rows for different analysis types
+        # Debug: Print columns before creating result rows
+        log_message(f"DataFrame columns before creating result rows: {list(df.columns)}")
+        
         nature_rows = df[["Activity (DQ Check Description)", "Predicted_DQ_Check_Nature", "Confidence"]].copy()
         nature_rows["Type"] = "Predicted_DQ_Check_Nature"
         nature_rows = nature_rows.rename(columns={
@@ -816,6 +866,12 @@ def run_analysis(main_file_path, instance_file_path=None,
             "Confidence": "Confidence (%)"
         })[["Activity (DQ Check Description)", "Type", "Value", "Confidence (%)"]]
 
+        # Debug: Check if combined columns exist
+        if "Top3_DQ_Check_Instance_Names_Combined" not in df.columns:
+            log_message("WARNING: Top3_DQ_Check_Instance_Names_Combined not in DataFrame columns!")
+        if "Top3_Instance_Confidences_Combined" not in df.columns:
+            log_message("WARNING: Top3_Instance_Confidences_Combined not in DataFrame columns!")
+            
         top3_combined_rows = df[["Activity (DQ Check Description)", "Top3_DQ_Check_Instance_Names_Combined", "Top3_Instance_Confidences_Combined"]].copy()
         top3_combined_rows["Type"] = "Top3_DQ_Check_Instance_Names_Combined"
         top3_combined_rows = top3_combined_rows.rename(columns={

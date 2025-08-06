@@ -1801,649 +1801,371 @@ if __name__ == "__main__":
             "Confidence (%)": confidence
         }
 
-        #import os
-# dq_analysis_core_enhanced.py
-# Enhanced version with better support for training data and improved FRASA
+# Replace the FRASA section in your run_analysis function with this code:
+# This should replace lines approximately from "update_progress(55, "Processing FRASA criteria...")" 
+# to the line before "update_progress(60, "Parsing column data...")"
 
-import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.naive_bayes import MultinomialNB
-from sklearn.pipeline import Pipeline
-from sklearn.metrics.pairwise import cosine_similarity
-import re
-from sklearn.linear_model import LogisticRegression
-import sys
-import joblib  # For saving/loading trained models
-import numpy as np
-import warnings
-warnings.filterwarnings('ignore')
-
-# CONFIGURATION - Default paths
-DEFAULT_INSTANCE_FILE_PATH = "C:/Users/savya/OneDrive/Desktop/Process Automation/DQ Check Instance.xlsx"
-DEFAULT_TRAINING_DATA_PATH = "C:/Users/savya/OneDrive/Desktop/Process Automation/DQ_Training_Data.xlsx"
-DEFAULT_MODEL_SAVE_PATH = "C:/Users/savya/OneDrive/Desktop/Process Automation/trained_models/"
-
-def load_training_data(training_file_path):
-    """Load and validate training data from Excel file"""
-    try:
-        # Load all sheets from the training data file
-        training_data = {}
+        update_progress(55, "Processing FRASA criteria...")
+        log_message("Processing FRASA criteria with enhanced detection...")
         
-        # Sheet 1: DQ Nature Training
-        if 'DQ_Nature_Training' in pd.ExcelFile(training_file_path).sheet_names:
-            training_data['dq_nature'] = pd.read_excel(training_file_path, sheet_name='DQ_Nature_Training')
-            
-        # Sheet 2: Instance Name Training
-        if 'Instance_Name_Training' in pd.ExcelFile(training_file_path).sheet_names:
-            training_data['instance_name'] = pd.read_excel(training_file_path, sheet_name='Instance_Name_Training')
-            
-        # Sheet 3: FRASA Training
-        if 'FRASA_Training' in pd.ExcelFile(training_file_path).sheet_names:
-            training_data['frasa'] = pd.read_excel(training_file_path, sheet_name='FRASA_Training')
-            
-        # Sheet 4: Type Alignment Training
-        if 'Type_Alignment_Training' in pd.ExcelFile(training_file_path).sheet_names:
-            training_data['type_alignment'] = pd.read_excel(training_file_path, sheet_name='Type_Alignment_Training')
-            
-        return training_data
-    except Exception as e:
-        print(f"Warning: Could not load training data: {str(e)}")
-        return {}
-
-def save_trained_models(models, save_path):
-    """Save trained models to disk for reuse"""
-    if not os.path.exists(save_path):
-        os.makedirs(save_path)
-    
-    for model_name, model in models.items():
-        joblib.dump(model, os.path.join(save_path, f"{model_name}.pkl"))
-
-def load_trained_models(load_path):
-    """Load previously trained models from disk"""
-    models = {}
-    if os.path.exists(load_path):
-        for file in os.listdir(load_path):
-            if file.endswith('.pkl'):
-                model_name = file.replace('.pkl', '')
-                models[model_name] = joblib.load(os.path.join(load_path, file))
-    return models
-
-def run_analysis(main_file_path, instance_file_path=None, 
-                training_file_path=None, use_saved_models=True,
-                run_spellcheck=True, run_nlp_analysis=True, run_validation=True,
-                progress_callback=None, log_callback=None):
-    """
-    Main function to run the DQ analysis with file paths as parameters
-    
-    Args:
-        main_file_path: Path to the main Excel file
-        instance_file_path: Path to instance file (uses DEFAULT_INSTANCE_FILE_PATH if None)
-        training_file_path: Path to training data file (uses DEFAULT_TRAINING_DATA_PATH if None)
-        use_saved_models: Whether to use previously saved models if available
-        run_spellcheck: Whether to run spell check
-        run_nlp_analysis: Whether to run NLP analysis
-        run_validation: Whether to run validation checks
-        progress_callback: Callback function for progress updates
-        log_callback: Callback function for log messages
-    """
-    
-    # Use default paths if not provided
-    if instance_file_path is None:
-        instance_file_path = DEFAULT_INSTANCE_FILE_PATH
-    if training_file_path is None:
-        training_file_path = DEFAULT_TRAINING_DATA_PATH
-    
-    def update_progress(value, status=""):
-        if progress_callback:
-            progress_callback(value, status)
-    
-    def log_message(message):
-        if log_callback:
-            log_callback(message)
-        else:
-            print(message)
-    
-    try:
-        # Load training data if available
-        training_data = {}
-        if training_file_path and os.path.exists(training_file_path):
-            log_message(f"Loading training data from: {training_file_path}")
-            training_data = load_training_data(training_file_path)
-            log_message(f"Loaded training data for: {list(training_data.keys())}")
+        # Import the enhanced FRASA function (add this at the top of your file)
+        # from enhanced_frasa import enhanced_frasa_check, extract_frasa_values
         
-        # Check for saved models
-        saved_models = {}
-        if use_saved_models and os.path.exists(DEFAULT_MODEL_SAVE_PATH):
-            saved_models = load_trained_models(DEFAULT_MODEL_SAVE_PATH)
-            log_message(f"Loaded {len(saved_models)} saved models")
+        # For inline integration, here's the complete FRASA section:
         
-        def train_dq_nature_model(definitions: dict, training_df=None):
-            # Check if we have a saved model
-            if 'dq_nature_model' in saved_models and training_df is None:
-                return saved_models['dq_nature_model']
-            
-            texts, labels = [], []
-            for label, text in definitions.items():
-                texts.append(text)
-                labels.append(label)
-            
-            # Add training data if available
-            if training_df is not None and not training_df.empty:
-                valid_data = training_df.dropna(subset=["Activity (DQ Check Description)", "DQ Check Nature"])
-                texts.extend(valid_data["Activity (DQ Check Description)"].tolist())
-                labels.extend(valid_data["DQ Check Nature"].tolist())
-                log_message(f"Added {len(valid_data)} training examples for DQ Nature model")
-            
-            pipeline = Pipeline([
-                ("vectorizer", TfidfVectorizer(ngram_range=(1, 2), max_features=5000)),
-                ("classifier", MultinomialNB(alpha=0.1))
-            ])
-            pipeline.fit(texts, labels)
-            return pipeline
-
-        def predict_with_confidence(model, descriptions):
-            proba = model.predict_proba(descriptions)
-            preds = model.predict(descriptions)
-            confidences = proba.max(axis=1)
-            return preds, confidences
-
-        update_progress(25, "Training DQ nature model...")
-        log_message("Training DQ nature model...")
+        # Get FRASA training data if available
+        frasa_training = training_data.get('frasa', pd.DataFrame())
         
-        definitions = {
-            "Detective": "DQ checks are back-end checks designed to identify when an error, irregularity, or other undesirable event has occurred",
-            "Preventive": "DQ checks are front-end checks designed to avoid the occurrence of errors, irregularities, or other undesirable events"
+        # Check if we should use sentence transformers
+        use_st_for_frasa = False
+        if use_sentence_transformers:  # This variable should already exist from earlier in the code
+            use_st_for_frasa = True
+        
+        # Enhanced FRASA keywords with comprehensive patterns
+        frasa_keywords = {
+            "Frequency": {
+                "primary": ["daily", "weekly", "monthly", "quarterly", "yearly", "annually", 
+                           "hourly", "real-time", "real time", "semi-annually", "biweekly", 
+                           "bimonthly", "continuous", "ongoing", "periodic", "scheduled"],
+                "secondary": ["every", "each", "per", "once", "twice", "times", "frequency",
+                             "interval", "schedule", "timing", "when", "occurrence"],
+                "patterns": [
+                    r'\b\d+\s*(times|x)\s*(per|a|an)\s*(day|week|month|year|hour)\b',
+                    r'\b(every|each)\s+\d*\s*(hour|day|week|month|quarter|year)s?\b',
+                    r'\b(on|at)\s+\d+:\d+\s*(am|pm|AM|PM)?\b',
+                    r'\b\d+(st|nd|rd|th)\s+(day|week)\s+of\b'
+                ]
+            },
+            "Responsible": {
+                "primary": ["owner", "team", "manager", "analyst", "admin", "administrator",
+                           "supervisor", "coordinator", "lead", "specialist", "department",
+                           "group", "unit", "staff", "personnel", "role"],
+                "secondary": ["by", "responsible", "party", "performed", "executed", "managed",
+                             "conducted", "carried", "handled", "assigned", "accountable"],
+                "patterns": [
+                    r'\b(performed|executed|managed|conducted|handled)\s+by\s+\w+\b',
+                    r'\b\w+\s+(team|department|group|unit)\b',
+                    r'\b(data|business|IT|finance|risk|compliance)\s+(team|owner|analyst)\b'
+                ]
+            },
+            "Activity": {
+                "primary": ["check", "validate", "review", "monitor", "ensure", "verify",
+                           "audit", "inspect", "examine", "test", "assess", "evaluate",
+                           "compare", "reconcile", "analyze", "investigate", "control"],
+                "secondary": ["activity", "process", "procedure", "task", "operation", "action",
+                             "step", "measure", "validation", "verification", "comparison"],
+                "patterns": [
+                    r'\b(checking|validating|reviewing|monitoring|ensuring|verifying)\b',
+                    r'\b(checks?|validates?|reviews?|monitors?|ensures?|verifies?)\b',
+                    r'\b(data|quality|integrity|accuracy|completeness)\s+(check|validation|review)\b'
+                ]
+            },
+            "Source": {
+                "primary": ["system", "database", "file", "table", "report", "application",
+                           "platform", "server", "source", "repository", "warehouse",
+                           "dataset", "feed", "interface", "API", "service"],
+                "secondary": ["from", "extracted", "sourced", "pulled", "retrieved", "obtained",
+                             "collected", "gathered", "imported", "loaded", "input"],
+                "patterns": [
+                    r'\b(from|sourced from|extracted from|pulled from)\s+\w+\b',
+                    r'\b\w+\s+(system|database|file|table|source)\b',
+                    r'\b(source|target|input|output)\s*:\s*\w+\b',
+                    r'\b[A-Z]{2,}\s*(system|database|platform)\b'
+                ]
+            },
+            "Action": {
+                "primary": ["alert", "flag", "notify", "report", "correct", "remediate",
+                           "escalate", "log", "email", "ticket", "update", "fix",
+                           "resolve", "address", "respond", "communicate"],
+                "secondary": ["action", "taken", "response", "outcome", "result", "consequence",
+                             "follow-up", "remediation", "resolution", "treatment"],
+                "patterns": [
+                    r'\b(alert|flag|notify|report|email|ticket)\s+(is\s+)?(sent|raised|created|generated)\b',
+                    r'\b(corrective|remedial|preventive)\s+action\b',
+                    r'\baction\s+(taken|required|needed)\b',
+                    r'\b(if|when|then)\s+\w+\s+(alert|notify|flag|report)\b'
+                ]
+            }
         }
         
-        # Use training data if available
-        dq_nature_training = training_data.get('dq_nature', pd.DataFrame())
-        model = train_dq_nature_model(definitions, training_df=dq_nature_training)
-
-        update_progress(30, "Loading main data file...")
-        log_message("Loading main data file...")
-        
-        df = pd.read_excel(
-            main_file_path, 
-            sheet_name="Data Asset Level DQ Checks",
-            header=8, usecols="C:Y", skiprows=range(9, 11))
-
-        descs = df["Activity (DQ Check Description)"].fillna("").tolist()
-        preds, confidences = predict_with_confidence(model, descs)
-        df["Predicted_DQ_Check_Nature"] = preds
-        df["Confidence"] = (confidences * 100).round(2)
-
-        update_progress(35, "Loading instance data...")
-        log_message(f"Loading instance data from: {instance_file_path}")
-        
-        if not os.path.exists(instance_file_path):
-            log_message(f"Warning: Instance file not found at {instance_file_path}. Creating dummy data.")
-            instance_df = pd.DataFrame({
-                "DQ Check Instance Name": ["Sample Instance 1", "Sample Instance 2"],
-                "Functional Description of the DQ Check": ["Sample Description 1", "Sample Description 2"],
-                "Type of DQ Check": ["Detective", "Preventive"],
-                "DQ Check Dimensions": ["Completeness", "Accuracy"]
-            })
-        else:
-            instance_df = pd.read_excel(instance_file_path)
-            log_message(f"Successfully loaded instance file with {len(instance_df)} records")
+        # Train FRASA models if training data available (with error handling)
+        frasa_models = {}
+        if not frasa_training.empty:
+            log_message("Training FRASA models with labeled data...")
             
-            # Validate required columns
-            required_cols = ["DQ Check Instance Name", "Functional Description of the DQ Check", "Type of DQ Check"]
-            missing_cols = [col for col in required_cols if col not in instance_df.columns]
-            if missing_cols:
-                log_message(f"Warning: Missing required columns in instance file: {missing_cols}")
-            
-            # Log unique Type of DQ Check values
-            if "Type of DQ Check" in instance_df.columns:
-                unique_types = instance_df["Type of DQ Check"].dropna().unique()
-                log_message(f"Found {len(unique_types)} unique 'Type of DQ Check' values: {sorted(unique_types)[:5]}...")
+            # Create a single vectorizer for all FRASA models
+            try:
+                vectorizer_frasa = TfidfVectorizer(
+                    ngram_range=(1, 3),
+                    max_features=5000,
+                    min_df=1,
+                    max_df=0.95
+                )
+                X_all = vectorizer_frasa.fit_transform(frasa_training["Description"].fillna(""))
                 
-                # Check if types match expected values
-                expected_types = {"Detective", "Preventive", "Format", "Completeness", "Accuracy", 
-                                 "Timeliness", "Uniqueness", "Consistency", "Reasonableness", "Integrity", "Other"}
-                actual_types = set(unique_types)
-                if not actual_types.intersection(expected_types):
-                    log_message("Note: Instance file uses different type categories than expected.")
-                    log_message(f"Expected types like: {sorted(list(expected_types))[:5]}...")
-                    log_message(f"But found types like: {sorted(list(actual_types))[:5]}...")
+                for criterion in ["Frequency", "Responsible", "Activity", "Source", "Action"]:
+                    if criterion in frasa_training.columns:
+                        try:
+                            y = frasa_training[criterion].values
+                            
+                            # Check for class balance
+                            unique_classes = np.unique(y)
+                            if len(unique_classes) < 2:
+                                log_message(f"Warning: {criterion} has only {len(unique_classes)} class(es). Skipping model training.")
+                                continue
+                            
+                            # Check for minimum samples
+                            if len(y) < 10:
+                                log_message(f"Warning: {criterion} has only {len(y)} samples. Skipping model training.")
+                                continue
+                            
+                            # Use MultinomialNB which is more robust for imbalanced data
+                            from sklearn.naive_bayes import MultinomialNB
+                            model = MultinomialNB(alpha=0.1)
+                            model.fit(X_all, y)
+                            
+                            frasa_models[criterion] = (model, vectorizer_frasa)
+                            log_message(f"Successfully trained model for {criterion}")
+                            
+                        except Exception as e:
+                            log_message(f"Could not train model for {criterion}: {str(e)}")
+            except Exception as e:
+                log_message(f"Error in FRASA model training: {str(e)}")
         
-        # Create combined text for better matching
-        # Check which columns actually exist in the instance file
-        combined_parts = []
-        if "DQ Check Instance Name" in instance_df.columns:
-            combined_parts.append(instance_df["DQ Check Instance Name"].fillna(''))
-        if "Functional Description of the DQ Check" in instance_df.columns:
-            combined_parts.append(instance_df["Functional Description of the DQ Check"].fillna(''))
-        if "Type of DQ Check" in instance_df.columns:
-            combined_parts.append(instance_df["Type of DQ Check"].fillna(''))
-        if "DQ Check Dimensions" in instance_df.columns:
-            combined_parts.append(instance_df["DQ Check Dimensions"].fillna(''))
-        
-        # Combine all available parts
-        if combined_parts:
-            instance_df["combined_text"] = combined_parts[0]
-            for part in combined_parts[1:]:
-                instance_df["combined_text"] = instance_df["combined_text"] + " " + part
-        else:
-            instance_df["combined_text"] = ""
-        instance_names = instance_df["DQ Check Instance Name"].tolist()
-        instance_texts = instance_df["combined_text"].tolist()
-
-        update_progress(40, "Computing similarities...")
-        log_message("Computing text similarities...")
-        
-        # --- Improved Top3 Instance Matching ---
-        use_sentence_transformers = False
-        model_st = None  # Initialize model_st
-        try:
-            from sentence_transformers import SentenceTransformer, util as st_util
-            # Path to the local model directory
-            local_model_path = r"C:\Users\savya\.cache\huggingface\hub\models--sentence-transformers--all-MiniLM-L6-v2\snapshots"
-            # Find the latest snapshot directory
-            snapshot_folders = [os.path.join(local_model_path, d) for d in os.listdir(local_model_path) if os.path.isdir(os.path.join(local_model_path, d))]
-            if not snapshot_folders:
-                raise RuntimeError("No snapshot folders found in the local model path.")
-            latest_snapshot = max(snapshot_folders, key=os.path.getmtime)
-            model_st = SentenceTransformer(latest_snapshot)
-            use_sentence_transformers = True
-            log_message(f"Using local Sentence Transformers model from: {latest_snapshot}")
-        except ImportError:
-            log_message("Sentence Transformers not available, falling back to TF-IDF.")
-        except Exception as e:
-            log_message(f"Could not load local Sentence Transformers model: {e}. Falling back to TF-IDF.")
-
-        # Enhanced instance texts with training data
-        instance_name_training = training_data.get('instance_name', pd.DataFrame())
-        
-        # Create enriched instance profiles
-        instance_enriched_texts = []
-        for i, (name, text) in enumerate(zip(instance_names, instance_texts)):
-            enriched_text = text
+        # Enhanced FRASA checking function
+        def check_frasa_criteria_enhanced(description):
+            """Enhanced FRASA checking with multiple detection methods"""
+            if not isinstance(description, str) or not description.strip():
+                return ["Frequency", "Responsible", "Activity", "Source", "Action"], {}
             
-            # Add training examples if available
-            if not instance_name_training.empty and name in instance_name_training["DQ Check Instance Name"].values:
-                # Get all training descriptions for this instance name
-                training_examples = instance_name_training[
-                    instance_name_training["DQ Check Instance Name"] == name
-                ]["Activity (DQ Check Description)"].tolist()
+            missing = []
+            present = []
+            confidence_scores = {}
+            desc_lower = description.lower()
+            
+            for criterion in ["Frequency", "Responsible", "Activity", "Source", "Action"]:
+                found = False
+                confidence = 0.0
                 
-                if training_examples:
-                    # Add up to 5 training examples to enrich the instance profile
-                    examples_text = " EXAMPLES: " + " | ".join(training_examples[:5])
-                    enriched_text = text + examples_text
-                    if i < 5:  # Log first few enrichments
-                        log_message(f"Enriched instance '{name}' with {len(training_examples)} training examples")
+                # Method 1: Try trained model first
+                if criterion in frasa_models:
+                    try:
+                        model, vect = frasa_models[criterion]
+                        X = vect.transform([description])
+                        pred = model.predict(X)[0]
+                        proba = model.predict_proba(X)[0]
+                        
+                        if pred == 1:
+                            found = True
+                            confidence = max(confidence, proba[1] if len(proba) > 1 else 0.7)
+                    except Exception as e:
+                        pass  # Fall back to keyword matching
+                
+                # Method 2: Enhanced keyword matching
+                if not found:
+                    keyword_score = 0.0
+                    
+                    # Check primary keywords (higher weight)
+                    for keyword in frasa_keywords[criterion]["primary"]:
+                        if re.search(r'\b' + re.escape(keyword) + r'\b', desc_lower):
+                            keyword_score = max(keyword_score, 0.8)
+                            found = True
+                    
+                    # Check secondary keywords (medium weight)
+                    if not found:
+                        for keyword in frasa_keywords[criterion]["secondary"]:
+                            if re.search(r'\b' + re.escape(keyword) + r'\b', desc_lower):
+                                keyword_score = max(keyword_score, 0.6)
+                                found = True
+                    
+                    # Check patterns (high weight if matched)
+                    for pattern in frasa_keywords[criterion]["patterns"]:
+                        if re.search(pattern, desc_lower):
+                            keyword_score = max(keyword_score, 0.9)
+                            found = True
+                            break
+                    
+                    confidence = max(confidence, keyword_score)
+                
+                # Method 3: Sentence transformer similarity (if available)
+                if use_st_for_frasa and model_st and not found:
+                    try:
+                        # Create criterion-specific example sentences
+                        criterion_examples = {
+                            "Frequency": ["daily check", "weekly review", "monthly validation", "quarterly audit"],
+                            "Responsible": ["team performs", "analyst executes", "manager responsible", "owner validates"],
+                            "Activity": ["validate data", "check accuracy", "review completeness", "monitor quality"],
+                            "Source": ["from database", "source system", "input file", "data warehouse"],
+                            "Action": ["send alert", "create ticket", "flag error", "notify team"]
+                        }
+                        
+                        if criterion in criterion_examples:
+                            desc_emb = model_st.encode([description], convert_to_tensor=True)
+                            example_embs = model_st.encode(criterion_examples[criterion], convert_to_tensor=True)
+                            
+                            from sentence_transformers import util
+                            similarities = util.pytorch_cos_sim(desc_emb, example_embs)
+                            max_sim = float(similarities.max())
+                            
+                            if max_sim > 0.5:
+                                found = True
+                                confidence = max(confidence, max_sim)
+                    except Exception as e:
+                        pass
+                
+                # Store results
+                confidence_scores[criterion] = confidence
+                if not found:
+                    missing.append(criterion)
+                else:
+                    present.append(criterion)
             
-            instance_enriched_texts.append(enriched_text)
+            return missing, confidence_scores
         
-        descs = df["Activity (DQ Check Description)"].fillna("").tolist()
-        top3_instance_names = []
-        top3_confidences = []
+        # Extract specific FRASA values from descriptions
+        def extract_frequency(text):
+            """Extract frequency information from text"""
+            text_lower = text.lower() if isinstance(text, str) else ""
+            
+            # Direct frequency keywords
+            freq_keywords = ["daily", "weekly", "monthly", "quarterly", "yearly", "hourly", 
+                           "real-time", "real time", "annually", "semi-annually", "biweekly"]
+            for word in freq_keywords:
+                if re.search(r'\b' + re.escape(word) + r'\b', text_lower):
+                    return word
+            
+            # Pattern-based extraction
+            patterns = [
+                (r'\b(\d+)\s*times?\s*per\s*(\w+)\b', lambda m: f"{m.group(1)} times per {m.group(2)}"),
+                (r'\b(every|each)\s+(\w+)\b', lambda m: f"{m.group(1)} {m.group(2)}"),
+            ]
+            for pattern, formatter in patterns:
+                match = re.search(pattern, text_lower)
+                if match:
+                    return formatter(match)
+            
+            return ""
         
-        if use_sentence_transformers:
-            # Compute embeddings for enriched instance profiles and descriptions
-            log_message("Computing sentence embeddings for enriched instance profiles...")
-            instance_embs = model_st.encode(instance_enriched_texts, convert_to_tensor=True, show_progress_bar=False)
-            desc_embs = model_st.encode(descs, convert_to_tensor=True, show_progress_bar=False)
+        def extract_source(text):
+            """Extract source system information from text"""
+            text_lower = text.lower() if isinstance(text, str) else ""
             
-            for desc_emb in desc_embs:
-                sims = st_util.pytorch_cos_sim(desc_emb, instance_embs).cpu().numpy().flatten()
-                n_instances = len(instance_names)
-                top_k = min(3, n_instances)
-                top_idx = sims.argsort()[-top_k:][::-1] if n_instances > 0 else []
-                names = [instance_names[i] for i in top_idx]
-                # Boost confidence if training data was used
-                confs = []
-                for idx in top_idx:
-                    base_conf = float(sims[idx])
-                    # If this instance had training examples, boost confidence slightly
-                    if instance_enriched_texts[idx] != instance_texts[idx]:  # Was enriched
-                        boost = min(0.1, base_conf * 0.15)  # Up to 15% boost, max 0.1
-                        confs.append(round((base_conf + boost) * 100, 2))
-                    else:
-                        confs.append(round(base_conf * 100, 2))
-                # Pad to length 3
-                while len(names) < 3:
-                    names.append("")
-                    confs.append(0.0)
-                top3_instance_names.append(names)
-                top3_confidences.append(confs)
-        else:
-            # TF-IDF approach with enriched texts
-            log_message("Using TF-IDF with enriched instance profiles...")
-            vectorizer = TfidfVectorizer(ngram_range=(1, 3))
-            all_texts = descs + instance_enriched_texts
-            tfidf_matrix = vectorizer.fit_transform(all_texts)
-            desc_vectors = tfidf_matrix[:len(descs)]
-            instance_vectors = tfidf_matrix[len(descs):]
-            n_instances = len(instance_names)
+            # Pattern-based extraction
+            patterns = [
+                r'(?:from|sourced from|extracted from|pulled from)\s+([a-zA-Z0-9_\-\s]+?)(?:\s|,|\.|$)',
+                r'\b([A-Z]{2,})\s+(?:system|database|platform)\b',
+                r'source\s*:\s*([^,.\n]+)',
+            ]
             
-            for desc_vec in desc_vectors:
-                sims = cosine_similarity(desc_vec, instance_vectors).flatten() if n_instances > 0 else []
-                top_k = min(3, n_instances)
-                top_idx = sims.argsort()[-top_k:][::-1] if n_instances > 0 else []
-                names = [instance_names[i] for i in top_idx]
-                # Boost confidence if training data was used
-                confs = []
-                for idx in top_idx:
-                    base_conf = sims[idx]
-                    # If this instance had training examples, boost confidence slightly
-                    if instance_enriched_texts[idx] != instance_texts[idx]:  # Was enriched
-                        boost = min(0.1, base_conf * 0.15)  # Up to 15% boost, max 0.1
-                        confs.append(round((base_conf + boost) * 100, 2))
-                    else:
-                        confs.append(round(base_conf * 100, 2))
-                # Pad to length 3
-                while len(names) < 3:
-                    names.append("")
-                    confs.append(0.0)
-                top3_instance_names.append(names)
-                top3_confidences.append(confs)
-
-        # Define pad_list function here before using it
-        def pad_list(lst, length=3, pad_value=""):
-            """Ensure a list has exactly 'length' elements by padding with pad_value"""
-            if isinstance(lst, (list, tuple, np.ndarray)):
-                lst = list(lst)
+            for pattern in patterns:
+                match = re.search(pattern, text_lower if not pattern.startswith(r'\b([A-Z]') else text)
+                if match:
+                    return match.group(1).strip()
+            
+            return ""
+        
+        def extract_action(text):
+            """Extract action taken information from text"""
+            text_lower = text.lower() if isinstance(text, str) else ""
+            
+            # Action keywords with context
+            action_patterns = [
+                (r'(alert|notification|email)\s+(?:is\s+)?(?:sent|raised|triggered)', lambda m: f"{m.group(1)} sent"),
+                (r'(ticket|flag|report)\s+(?:is\s+)?(?:created|generated|raised)', lambda m: f"{m.group(1)} created"),
+                (r'(corrective|remedial|preventive)\s+action', lambda m: f"{m.group(1)} action"),
+            ]
+            
+            for pattern, formatter in action_patterns:
+                match = re.search(pattern, text_lower)
+                if match:
+                    return formatter(match)
+            
+            # Simple action keywords
+            action_keywords = ["flag", "notify", "report", "correct", "remediate", "alert", 
+                             "escalate", "update", "email", "ticket", "log"]
+            for word in action_keywords:
+                if re.search(r'\b' + re.escape(word) + r'\b', text_lower):
+                    return word
+            
+            return ""
+        
+        def extract_automation(text):
+            """Extract automation extent from text"""
+            text_lower = text.lower() if isinstance(text, str) else ""
+            
+            if re.search(r'\bautomat(ed|ically|ion)\b', text_lower):
+                return "Automated"
+            elif re.search(r'\bmanual(ly)?\b', text_lower):
+                return "Manual"
+            elif re.search(r'\bsemi[\s\-]?automat(ed|ic)\b', text_lower):
+                return "Semi-Automated"
+            
+            return ""
+        
+        # Process FRASA for each row
+        frasa_rows = []
+        for idx, row in df.iterrows():
+            desc = str(row.get("Activity (DQ Check Description)", ""))
+            
+            if not desc or desc == "nan":
+                frasa_rows.append({
+                    "Activity (DQ Check Description)": desc,
+                    "Type": "FRASA_Criteria_Check",
+                    "Value": "Empty description",
+                    "Confidence (%)": 0.0
+                })
+                continue
+            
+            # Check FRASA criteria
+            missing, confidence_scores = check_frasa_criteria_enhanced(desc)
+            
+            # Calculate overall metrics
+            total_criteria = 5
+            present_count = total_criteria - len(missing)
+            completeness_score = (present_count / total_criteria) * 100
+            
+            # Calculate average confidence for present criteria
+            present_criteria = [c for c in confidence_scores.keys() if c not in missing]
+            if present_criteria:
+                avg_confidence = np.mean([confidence_scores[c] for c in present_criteria]) * 100
             else:
-                lst = [lst]
+                avg_confidence = 0
             
-            # Ensure we have exactly 'length' elements
-            if len(lst) < length:
-                lst = lst + [pad_value] * (length - len(lst))
-            elif len(lst) > length:
-                lst = lst[:length]
+            # Weighted final confidence (70% completeness, 30% detection confidence)
+            final_confidence = (completeness_score * 0.7) + (avg_confidence * 0.3)
             
-            return lst
-
-        # Defensive fix: ensure every entry is a list of length 3
-        # Add debugging to identify the issue
-        try:
-            # First, let's make sure top3_instance_names and top3_confidences are lists of lists
-            fixed_names = []
-            fixed_confs = []
-            
-            for i, (names, confs) in enumerate(zip(top3_instance_names, top3_confidences)):
-                # Debug logging for first few entries
-                if i < 3:  # Log first 3 entries for debugging
-                    log_message(f"Entry {i} - Names type: {type(names)}, Confs type: {type(confs)}")
-                    log_message(f"Entry {i} - Names: {names}, Confs: {confs}")
-                
-                # Ensure names is a list
-                if isinstance(names, (list, tuple, np.ndarray)):
-                    names_list = list(names)
-                elif isinstance(names, str):
-                    names_list = [names] if names else []
-                elif names is None or (isinstance(names, float) and np.isnan(names)):
-                    names_list = []
+            # Format the result
+            if missing:
+                if len(missing) == total_criteria:
+                    value = "All criteria missing"
                 else:
-                    names_list = [str(names)]
-                
-                # Ensure confs is a list
-                if isinstance(confs, (list, tuple, np.ndarray)):
-                    confs_list = list(confs)
-                elif isinstance(confs, (int, float)):
-                    confs_list = [float(confs)] if not (isinstance(confs, float) and np.isnan(confs)) else []
-                elif confs is None:
-                    confs_list = []
-                else:
-                    confs_list = [float(confs)]
-                
-                # Pad to length 3
-                fixed_names.append(pad_list(names_list, 3, ""))
-                fixed_confs.append(pad_list(confs_list, 3, 0.0))
+                    value = f"Missing: {', '.join(missing)}"
+                    # Add which criteria were found
+                    if present_count > 0:
+                        found = [c for c in ["Frequency", "Responsible", "Activity", "Source", "Action"] if c not in missing]
+                        value += f" | Found: {', '.join(found)}"
+            else:
+                value = "All criteria present"
             
-            top3_instance_names = fixed_names
-            top3_confidences = fixed_confs
+            # Add method indicators if models were used
+            if frasa_models:
+                value += " (ML-enhanced)"
             
-        except Exception as e:
-            log_message(f"Error in fixing top3 lists: {str(e)}")
-            log_message(f"top3_instance_names length: {len(top3_instance_names) if top3_instance_names else 0}")
-            log_message(f"top3_confidences length: {len(top3_confidences) if top3_confidences else 0}")
-            raise
-
-        # Now safely extract the values with proper list initialization
-        try:
-            # Initialize lists to collect values
-            top1_names = []
-            top1_confs = []
-            top2_names = []
-            top2_confs = []
-            top3_names = []
-            top3_confs = []
-            
-            # Extract values from each entry
-            for names, confs in zip(top3_instance_names, top3_confidences):
-                # Names and confs should now be guaranteed to be lists of length 3
-                top1_names.append(names[0] if len(names) > 0 else "")
-                top1_confs.append(confs[0] if len(confs) > 0 else 0.0)
-                top2_names.append(names[1] if len(names) > 1 else "")
-                top2_confs.append(confs[1] if len(confs) > 1 else 0.0)
-                top3_names.append(names[2] if len(names) > 2 else "")
-                top3_confs.append(confs[2] if len(confs) > 2 else 0.0)
-            
-            # Assign the complete lists to DataFrame columns
-            df["Top1_DQ_Check_Instance_Name"] = top1_names
-            df["Top1_Instance_Confidence"] = top1_confs
-            df["Top2_DQ_Check_Instance_Name"] = top2_names
-            df["Top2_Instance_Confidence"] = top2_confs
-            df["Top3_DQ_Check_Instance_Name"] = top3_names
-            df["Top3_Instance_Confidence"] = top3_confs
-            
-            log_message(f"Successfully assigned top3 columns. DataFrame shape: {df.shape}")
-                
-        except Exception as e:
-            log_message(f"Error extracting top3 values: {str(e)}")
-            log_message(f"DataFrame shape: {df.shape}")
-            log_message(f"Number of entries to assign: {len(top1_names) if 'top1_names' in locals() else 'undefined'}")
-            raise
-
-        df["Top3_DQ_Check_Instance_Names_Combined"] = (
-            df["Top1_DQ_Check_Instance_Name"].fillna('') + " | " +
-            df["Top2_DQ_Check_Instance_Name"].fillna('') + " | " +
-            df["Top3_DQ_Check_Instance_Name"].fillna('')
-        )
-        df["Top3_Instance_Confidences_Combined"] = (
-            df["Top1_Instance_Confidence"].astype(str) + " | " +
-            df["Top2_Instance_Confidence"].astype(str) + " | " +
-            df["Top3_Instance_Confidence"].astype(str)
-        )
-
-        update_progress(50, "Training instance model...")
-        log_message("Training instance name model...")
+            frasa_rows.append({
+                "Activity (DQ Check Description)": desc,
+                "Type": "FRASA_Criteria_Check",
+                "Value": value,
+                "Confidence (%)": round(final_confidence, 2)
+            })
         
-        def train_instance_name_model(instance_df, training_df=None):
-            if 'instance_name_model' in saved_models and training_df is None:
-                return saved_models['instance_name_model']
-            
-            # Preprocess text data
-            def preprocess_text(text):
-                text = str(text).lower()
-                # Remove special characters but keep spaces
-                text = re.sub(r'[^a-zA-Z0-9\s]', ' ', text)
-                # Remove extra whitespace
-                text = ' '.join(text.split())
-                return text
-            
-            texts = [preprocess_text(text) for text in instance_df["combined_text"].fillna("").tolist()]
-            labels = instance_df["DQ Check Instance Name"].tolist()
-            
-            # Add training data if available
-            if training_df is not None and not training_df.empty:
-                valid_data = training_df.dropna(subset=["Activity (DQ Check Description)", "DQ Check Instance Name"])
-                processed_texts = [preprocess_text(text) for text in valid_data["Activity (DQ Check Description)"].tolist()]
-                texts.extend(processed_texts)
-                labels.extend(valid_data["DQ Check Instance Name"].tolist())
-                log_message(f"Added {len(valid_data)} training examples for Instance Name model")
-            
-            # Calculate class weights to handle imbalanced data
-            from sklearn.utils.class_weight import compute_class_weight
-            unique_labels = np.unique(labels)
-            class_weights = compute_class_weight('balanced', classes=unique_labels, y=labels)
-            class_weight_dict = dict(zip(unique_labels, class_weights))
-            
-            # Create pipeline with enhanced features
-            pipeline = Pipeline([
-                ("vectorizer", TfidfVectorizer(
-                    ngram_range=(1, 3),  # Include trigrams
-                    max_features=10000,   # Increase features
-                    min_df=2,            # Remove rare terms
-                    max_df=0.95,         # Remove very common terms
-                    sublinear_tf=True    # Apply sublinear scaling
-                )),
-                ("classifier", LogisticRegression(  # Switch to LogisticRegression
-                    max_iter=1000,
-                    class_weight=class_weight_dict,
-                    multi_class='multinomial',
-                    solver='lbfgs',
-                    C=1.0                # Regularization parameter
-                ))
-            ])
-            
-            # Fit the pipeline
-            pipeline.fit(texts, labels)
-            
-            return pipeline
+        # Create FRASA DataFrame
+        frasa_df = pd.DataFrame(frasa_rows)
         
-        # Additional enhancement for semantic similarity matching
-        def create_semantic_instance_matcher(instance_df, training_df=None):
-            """
-            Create a semantic matcher that uses embeddings for better instance matching
-            This can be used alongside or instead of the ML model for better accuracy
-            """
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            from sklearn.metrics.pairwise import cosine_similarity
-            import numpy as np
-            
-            # Create instance profiles with rich features
-            instance_profiles = {}
-            
-            for idx, row in instance_df.iterrows():
-                instance_name = row["DQ Check Instance Name"]
-                
-                # Create a comprehensive profile for each instance
-                profile_parts = []
-                
-                # Instance name (often contains key information)
-                profile_parts.append(str(instance_name))
-                
-                # Functional description
-                if "Functional Description of the DQ Check" in row and pd.notna(row["Functional Description of the DQ Check"]):
-                    profile_parts.append(str(row["Functional Description of the DQ Check"]))
-                
-                # Type of check
-                if "Type of DQ Check" in row and pd.notna(row["Type of DQ Check"]):
-                    profile_parts.append(f"type: {row['Type of DQ Check']}")
-                
-                # Dimensions
-                if "DQ Check Dimensions" in row and pd.notna(row["DQ Check Dimensions"]):
-                    profile_parts.append(f"dimension: {row['DQ Check Dimensions']}")
-                
-                # Extract semantic keywords from instance name
-                keywords = []
-                
-                # Data quality dimension keywords
-                quality_dimensions = {
-                    'completeness': ['complete', 'missing', 'null', 'blank', 'empty', 'populated', 'required'],
-                    'accuracy': ['accurate', 'correct', 'valid', 'precise', 'exact', 'right'],
-                    'consistency': ['consistent', 'match', 'align', 'agree', 'same', 'uniform'],
-                    'timeliness': ['timely', 'late', 'delay', 'on-time', 'schedule', 'sla', 'deadline'],
-                    'uniqueness': ['unique', 'duplicate', 'distinct', 'redundant', 'copy'],
-                    'validity': ['valid', 'format', 'pattern', 'structure', 'syntax', 'rule'],
-                    'integrity': ['integrity', 'referential', 'foreign', 'key', 'relationship', 'constraint']
-                }
-                
-                for dimension, dim_keywords in quality_dimensions.items():
-                    for keyword in dim_keywords:
-                        if keyword in instance_name.lower() or (len(profile_parts) > 1 and keyword in ' '.join(profile_parts).lower()):
-                            keywords.append(dimension)
-                            keywords.extend(dim_keywords[:3])  # Add top related keywords
-                            break
-                
-                # Check type keywords
-                check_types = {
-                    'reconciliation': ['reconcile', 'balance', 'match', 'compare', 'difference', 'variance'],
-                    'threshold': ['threshold', 'limit', 'range', 'minimum', 'maximum', 'boundary'],
-                    'trend': ['trend', 'pattern', 'change', 'increase', 'decrease', 'growth'],
-                    'aggregation': ['sum', 'count', 'average', 'total', 'aggregate', 'group'],
-                    'business_rule': ['rule', 'logic', 'condition', 'requirement', 'policy', 'standard']
-                }
-                
-                for check_type, type_keywords in check_types.items():
-                    for keyword in type_keywords:
-                        if keyword in instance_name.lower() or (len(profile_parts) > 1 and keyword in ' '.join(profile_parts).lower()):
-                            keywords.append(check_type)
-                            keywords.extend(type_keywords[:3])
-                            break
-                
-                # Add keywords to profile
-                if keywords:
-                    profile_parts.append(f"keywords: {' '.join(set(keywords))}")
-                
-                # Add examples from training data if available
-                if training_df is not None and not training_df.empty:
-                    examples = training_df[training_df["DQ Check Instance Name"] == instance_name]["Activity (DQ Check Description)"].tolist()
-                    if examples:
-                        # Add up to 3 examples
-                        profile_parts.append(f"examples: {' | '.join(examples[:3])}")
-                
-                instance_profiles[instance_name] = ' '.join(profile_parts).lower()
-            
-            # Create vectorizer with enhanced features
-            vectorizer = TfidfVectorizer(
-                ngram_range=(1, 3),
-                max_features=5000,
-                min_df=1,
-                sublinear_tf=True,
-                use_idf=True,
-                token_pattern=r'(?u)\b\w+\b'  # Include single character tokens
-            )
-            
-            # Fit vectorizer on all profiles
-            profile_texts = list(instance_profiles.values())
-            profile_vectors = vectorizer.fit_transform(profile_texts)
-            instance_names = list(instance_profiles.keys())
-            
-            def match_instance(description, top_k=5, confidence_threshold=0.3):
-                """
-                Match a description to the most likely instance names
-                Returns top K matches with confidence scores
-                """
-                # Preprocess description
-                desc_lower = str(description).lower()
-                
-                # Extract features from description
-                desc_features = [desc_lower]
-                
-                # Add detected dimensions and types
-                for dimension, dim_keywords in quality_dimensions.items():
-                    if any(keyword in desc_lower for keyword in dim_keywords):
-                        desc_features.append(f"dimension: {dimension}")
-                
-                for check_type, type_keywords in check_types.items():
-                    if any(keyword in desc_lower for keyword in type_keywords):
-                        desc_features.append(f"type: {check_type}")
-                
-                # Vectorize description
-                desc_text = ' '.join(desc_features)
-                desc_vector = vectorizer.transform([desc_text])
-                
-                # Calculate similarities
-                similarities = cosine_similarity(desc_vector, profile_vectors).flatten()
-                
-                # Get top K matches
-                top_indices = similarities.argsort()[-top_k:][::-1]
-                
-                matches = []
-                for idx in top_indices:
-                    if similarities[idx] >= confidence_threshold:
-                        matches.append({
-                            'instance_name': instance_names[idx],
-                            'confidence': similarities[idx],
-                            'profile': instance_profiles[instance_names[idx]][:200]  # First 200 chars of profile
-                        })
-                
-                return matches
-            
-            return match_instance, instance_profiles
-
+        # Log FRASA summary
+        if len(frasa_df) > 0:
+            complete_count = sum(1 for v in frasa_df["Value"] if "All criteria present" in str(v))
+            avg_conf = frasa_df["Confidence (%)"].mean()
+            log_message(f"FRASA Check Complete: {complete_count}/{len(frasa_df)} descriptions have all criteria")
+            log_message(f"Average FRASA confidence: {avg_conf:.2f}%")
+        
+        # Continue with the rest of the original code...

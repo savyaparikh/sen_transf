@@ -40,6 +40,10 @@ def load_training_data(training_file_path):
         if 'Type_Alignment_Training' in pd.ExcelFile(training_file_path).sheet_names:
             training_data['type_alignment'] = pd.read_excel(training_file_path, sheet_name='Type_Alignment_Training')
             
+        # Sheet 5: Type of DQ Check Alignment (new sheet)
+        if 'Type_of_DQ_Check_Alignment' in pd.ExcelFile(training_file_path).sheet_names:
+            training_data['type_alignment'] = pd.read_excel(training_file_path, sheet_name='Type_of_DQ_Check_Alignment')
+            
         return training_data
     except Exception as e:
         print(f"Warning: Could not load training data: {str(e)}")
@@ -1165,48 +1169,279 @@ def run_analysis(main_file_path, instance_file_path=None,
         df["Best_Match_Instance_Name"] = best_instance_names
 
         def train_type_model_with_instance(df, training_df=None):
+            """
+            Train a model to predict Type of DQ Check using Sentence Transformers
+            """
             if 'type_alignment_model' in saved_models and training_df is None:
                 return saved_models['type_alignment_model']
-                
-            texts, labels = [], []
             
-            # First try to get training data from the main dataframe
-            # Only use rows where we have all necessary fields
-            df_train = df.dropna(subset=["Activity (DQ Check Description)", "Type of DQ Check"])
-            if "Best_Match_Instance_Name" in df_train.columns:
-                df_train = df_train.dropna(subset=["Best_Match_Instance_Name"])
-                combined = df_train["Activity (DQ Check Description)"].astype(str) + " " + df_train["Best_Match_Instance_Name"].astype(str)
-                texts.extend(combined.tolist())
-                labels.extend(df_train["Type of DQ Check"].tolist())
+            # Define the 5 types with their descriptions
+            type_definitions = {
+                "File / Feed Movement": "Check related to file transfers or feed ingestion from external systems.",
+                "Database Movement": "Checks that validate data movement between sources and target database tables.",
+                "Zone Movement": "Checks involving data movement across different zones (e.g., staging to production).",
+                "API Data Movement": "Checks that validate data received via API calls, libraries, or jars.",
+                "Other": "Checks that do not fit into the above categories."
+            }
+            
+            # Try to use Sentence Transformers if available
+            use_st_for_type = False
+            model_st_type = None
+            
+            try:
+                if use_sentence_transformers and model_st:  # Reuse the already loaded model
+                    model_st_type = model_st
+                    use_st_for_type = True
+                    log_message("Using Sentence Transformers for Type alignment model")
+                else:
+                    # Try to load if not already loaded
+                    from sentence_transformers import SentenceTransformer
+                    local_model_path = r"C:\Users\savya\.cache\huggingface\hub\models--sentence-transformers--all-MiniLM-L6-v2\snapshots"
+                    snapshot_folders = [os.path.join(local_model_path, d) for d in os.listdir(local_model_path) if os.path.isdir(os.path.join(local_model_path, d))]
+                    if snapshot_folders:
+                        latest_snapshot = max(snapshot_folders, key=os.path.getmtime)
+                        model_st_type = SentenceTransformer(latest_snapshot)
+                        use_st_for_type = True
+                        log_message("Loaded Sentence Transformers for Type alignment model")
+            except Exception as e:
+                log_message(f"Could not use Sentence Transformers for Type model: {e}")
+                use_st_for_type = False
+            
+            if use_st_for_type:
+                # Create embeddings for type definitions
+                type_texts = []
+                type_labels = []
+                
+                for type_name, type_desc in type_definitions.items():
+                    # Create rich description including keywords
+                    keywords = []
+                    if "file" in type_name.lower() or "feed" in type_name.lower():
+                        keywords.extend(["file", "feed", "transfer", "ingestion", "external", "FTP", "SFTP", "batch"])
+                    elif "database" in type_name.lower():
+                        keywords.extend(["database", "table", "SQL", "query", "insert", "update", "ETL", "CDC"])
+                    elif "zone" in type_name.lower():
+                        keywords.extend(["zone", "staging", "production", "raw", "curated", "refined", "layer"])
+                    elif "api" in type_name.lower():
+                        keywords.extend(["API", "REST", "SOAP", "JSON", "XML", "endpoint", "service", "real-time"])
+                    
+                    enriched_desc = f"{type_name}: {type_desc} Keywords: {', '.join(keywords)}"
+                    type_texts.append(enriched_desc)
+                    type_labels.append(type_name)
+                
+                # Get type embeddings
+                type_embeddings = model_st_type.encode(type_texts, convert_to_tensor=False)
+                
+                # Prepare training data
+                texts = []
+                labels = []
+                
+                # Add examples from main dataframe
+                df_train = df.dropna(subset=["Activity (DQ Check Description)", "Type of DQ Check"])
+                if "Best_Match_Instance_Name" in df_train.columns:
+                    df_train = df_train.dropna(subset=["Best_Match_Instance_Name"])
+                    combined = df_train["Activity (DQ Check Description)"].astype(str) + " Instance: " + df_train["Best_Match_Instance_Name"].astype(str)
+                    texts.extend(combined.tolist())
+                    labels.extend(df_train["Type of DQ Check"].tolist())
+                else:
+                    texts.extend(df_train["Activity (DQ Check Description)"].astype(str).tolist())
+                    labels.extend(df_train["Type of DQ Check"].tolist())
+                
+                # Add training data if available
+                if training_df is not None and not training_df.empty:
+                    valid_data = training_df.dropna(subset=["Activity (DQ Check Description)", "Type of DQ Check"])
+                    texts.extend(valid_data["Activity (DQ Check Description)"].tolist())
+                    labels.extend(valid_data["Type of DQ Check"].tolist())
+                    log_message(f"Added {len(valid_data)} training examples for Type Alignment model")
+                
+                # Create enhanced training texts with context
+                enhanced_texts = []
+                for text, label in zip(texts, labels):
+                    # Add type context to training examples
+                    if label in type_definitions:
+                        context = type_definitions[label]
+                        enhanced_text = f"{text} Context: {context}"
+                    else:
+                        enhanced_text = text
+                    enhanced_texts.append(enhanced_text)
+                
+                # Create a hybrid model that uses embeddings
+                class SentenceTransformerTypeClassifier:
+                    def __init__(self, model_st, type_embeddings, type_labels, training_texts=None, training_labels=None):
+                        self.model_st = model_st
+                        self.type_embeddings = type_embeddings
+                        self.type_labels = type_labels
+                        self.classes_ = type_labels
+                        
+                        # Store training examples for k-NN style matching
+                        if training_texts and training_labels:
+                            self.training_embeddings = model_st.encode(training_texts, convert_to_tensor=False)
+                            self.training_labels = training_labels
+                        else:
+                            self.training_embeddings = None
+                            self.training_labels = None
+                    
+                    def predict(self, texts):
+                        # Get embeddings for input texts
+                        text_embeddings = self.model_st.encode(texts, convert_to_tensor=False)
+                        
+                        predictions = []
+                        for text_emb in text_embeddings:
+                            # Compare with type definition embeddings
+                            type_sims = cosine_similarity([text_emb], self.type_embeddings)[0]
+                            
+                            # If we have training examples, also compare with those
+                            if self.training_embeddings is not None:
+                                train_sims = cosine_similarity([text_emb], self.training_embeddings)[0]
+                                # Get top 5 most similar training examples
+                                top_k = min(5, len(train_sims))
+                                top_idx = train_sims.argsort()[-top_k:][::-1]
+                                
+                                # Vote based on training examples
+                                label_votes = {}
+                                for idx in top_idx:
+                                    label = self.training_labels[idx]
+                                    if label in label_votes:
+                                        label_votes[label] += train_sims[idx]
+                                    else:
+                                        label_votes[label] = train_sims[idx]
+                                
+                                # Combine with type definition similarities
+                                for i, type_label in enumerate(self.type_labels):
+                                    if type_label in label_votes:
+                                        # Weighted combination: 60% training examples, 40% type definitions
+                                        combined_score = 0.6 * label_votes[type_label] + 0.4 * type_sims[i]
+                                        type_sims[i] = combined_score
+                            
+                            # Get the best matching type
+                            best_idx = type_sims.argmax()
+                            predictions.append(self.type_labels[best_idx])
+                        
+                        return predictions
+                    
+                    def predict_proba(self, texts):
+                        # Get embeddings for input texts
+                        text_embeddings = self.model_st.encode(texts, convert_to_tensor=False)
+                        
+                        all_probas = []
+                        for text_emb in text_embeddings:
+                            # Compare with type definition embeddings
+                            type_sims = cosine_similarity([text_emb], self.type_embeddings)[0]
+                            
+                            # If we have training examples, also compare with those
+                            if self.training_embeddings is not None:
+                                train_sims = cosine_similarity([text_emb], self.training_embeddings)[0]
+                                # Get top 5 most similar training examples
+                                top_k = min(5, len(train_sims))
+                                top_idx = train_sims.argsort()[-top_k:][::-1]
+                                
+                                # Vote based on training examples
+                                label_votes = {}
+                                for idx in top_idx:
+                                    label = self.training_labels[idx]
+                                    if label in label_votes:
+                                        label_votes[label] += train_sims[idx]
+                                    else:
+                                        label_votes[label] = train_sims[idx]
+                                
+                                # Combine with type definition similarities
+                                for i, type_label in enumerate(self.type_labels):
+                                    if type_label in label_votes:
+                                        # Weighted combination
+                                        combined_score = 0.6 * label_votes[type_label] + 0.4 * type_sims[i]
+                                        type_sims[i] = combined_score
+                            
+                            # Convert similarities to probabilities
+                            # Apply softmax
+                            exp_sims = np.exp(type_sims * 5)  # Scale up for sharper distribution
+                            probas = exp_sims / exp_sims.sum()
+                            all_probas.append(probas)
+                        
+                        return np.array(all_probas)
+                
+                # Create the classifier
+                if enhanced_texts and labels:
+                    return SentenceTransformerTypeClassifier(
+                        model_st_type, type_embeddings, type_labels, 
+                        enhanced_texts, labels
+                    )
+                else:
+                    return SentenceTransformerTypeClassifier(
+                        model_st_type, type_embeddings, type_labels
+                    )
+            
             else:
-                # If Best_Match_Instance_Name not available, use just the description
-                texts.extend(df_train["Activity (DQ Check Description)"].astype(str).tolist())
-                labels.extend(df_train["Type of DQ Check"].tolist())
+                # Fallback to TF-IDF based approach
+                log_message("Using TF-IDF for Type alignment model")
                 
-            # Add training data if available
-            if training_df is not None and not training_df.empty:
-                valid_data = training_df.dropna(subset=["Activity (DQ Check Description)", "Type of DQ Check"])
-                texts.extend(valid_data["Activity (DQ Check Description)"].tolist())
-                labels.extend(valid_data["Type of DQ Check"].tolist())
-                log_message(f"Added {len(valid_data)} training examples for Type Alignment model")
+                texts, labels = [], []
                 
-            if not texts:
-                log_message("No training data available for type model")
-                return None
+                # Add type definitions as training examples
+                for type_name, type_desc in type_definitions.items():
+                    # Add the definition multiple times to give it more weight
+                    for _ in range(3):
+                        texts.append(type_desc)
+                        labels.append(type_name)
+                    
+                    # Add keywords as examples
+                    if "file" in type_name.lower() or "feed" in type_name.lower():
+                        texts.extend(["file transfer", "feed ingestion", "external file", "batch processing"])
+                        labels.extend([type_name] * 4)
+                    elif "database" in type_name.lower():
+                        texts.extend(["database table", "SQL query", "ETL process", "data migration"])
+                        labels.extend([type_name] * 4)
+                    elif "zone" in type_name.lower():
+                        texts.extend(["staging to production", "zone transfer", "data layer movement", "raw to curated"])
+                        labels.extend([type_name] * 4)
+                    elif "api" in type_name.lower():
+                        texts.extend(["API call", "REST service", "JSON response", "real-time data"])
+                        labels.extend([type_name] * 4)
                 
-            # Filter out any empty texts or labels
-            valid_pairs = [(t, l) for t, l in zip(texts, labels) if t.strip() and l.strip()]
-            if not valid_pairs:
-                return None
+                # Add examples from main dataframe
+                df_train = df.dropna(subset=["Activity (DQ Check Description)", "Type of DQ Check"])
+                if "Best_Match_Instance_Name" in df_train.columns:
+                    df_train = df_train.dropna(subset=["Best_Match_Instance_Name"])
+                    combined = df_train["Activity (DQ Check Description)"].astype(str) + " " + df_train["Best_Match_Instance_Name"].astype(str)
+                    texts.extend(combined.tolist())
+                    labels.extend(df_train["Type of DQ Check"].tolist())
+                else:
+                    texts.extend(df_train["Activity (DQ Check Description)"].astype(str).tolist())
+                    labels.extend(df_train["Type of DQ Check"].tolist())
                 
-            texts, labels = zip(*valid_pairs)
-            
-            pipeline = Pipeline([
-                ("vectorizer", TfidfVectorizer(ngram_range=(1, 2))),
-                ("classifier", MultinomialNB(alpha=0.1))
-            ])
-            pipeline.fit(texts, labels)
-            return pipeline
+                # Add training data if available
+                if training_df is not None and not training_df.empty:
+                    valid_data = training_df.dropna(subset=["Activity (DQ Check Description)", "Type of DQ Check"])
+                    texts.extend(valid_data["Activity (DQ Check Description)"].tolist())
+                    labels.extend(valid_data["Type of DQ Check"].tolist())
+                    log_message(f"Added {len(valid_data)} training examples for Type Alignment model")
+                
+                if not texts:
+                    log_message("No training data available for type model")
+                    return None
+                
+                # Filter out any empty texts or labels
+                valid_pairs = [(t, l) for t, l in zip(texts, labels) if t.strip() and l.strip()]
+                if not valid_pairs:
+                    return None
+                
+                texts, labels = zip(*valid_pairs)
+                
+                # Use Logistic Regression for better probability estimates
+                pipeline = Pipeline([
+                    ("vectorizer", TfidfVectorizer(
+                        ngram_range=(1, 3),
+                        max_features=5000,
+                        min_df=1,
+                        max_df=0.95
+                    )),
+                    ("classifier", LogisticRegression(
+                        max_iter=1000,
+                        multi_class='multinomial',
+                        solver='lbfgs',
+                        C=0.5
+                    ))
+                ])
+                pipeline.fit(texts, labels)
+                return pipeline
 
         type_alignment_training = training_data.get('type_alignment', pd.DataFrame())
         type_model = train_type_model_with_instance(df, training_df=type_alignment_training)

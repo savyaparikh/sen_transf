@@ -65,6 +65,7 @@ class IntraDaySentiment:
         self.today_sessions = {}        # ECN_MSG_ID -> running session state
         self.ticks = []                 # all processed ticks
         self.dealer_links = {}          # today ECN_MSG_ID -> yesterday ECN_MSG_ID
+        self.match_confidence = {}      # today ECN_MSG_ID -> confidence score (0-100)
         self._matched_groups = {}       # cache: (CUSIP, qty_bucket) -> already matched flag
 
     # =================================================================
@@ -210,6 +211,7 @@ class IntraDaySentiment:
 
         prior_price = prior_session['last_price']
         bps_delta = round((price - prior_price) * 100, 2)
+        confidence = self.match_confidence.get(msg_id, 0)
 
         processed = {
             'SECURITY_ID': sec_id,
@@ -222,6 +224,7 @@ class IntraDaySentiment:
             'linked_to': linked_prior_id,
             'prior_price': prior_price,
             'bps_delta': bps_delta,
+            'confidence': confidence,
             'matched': True,
         }
         self.ticks.append(processed)
@@ -273,41 +276,87 @@ class IntraDaySentiment:
         # Apply links (clear old links for this group first)
         for s in curr:
             self.dealer_links.pop(s['ECN_MSG_ID'], None)
+            self.match_confidence.pop(s['ECN_MSG_ID'], None)
 
         for ri, ci in zip(row_ind, col_ind):
             if ri < n_prev and ci < n_curr and cost_matrix[ri, ci] < self.match_cost_threshold:
                 today_id = curr[ci]['ECN_MSG_ID']
                 yest_id = prev[ri]['ECN_MSG_ID']
                 self.dealer_links[today_id] = yest_id
+                self.match_confidence[today_id] = self._cost_to_confidence(
+                    cost_matrix[ri, ci], prev[ri], curr[ci]
+                )
+
+    def _cost_to_confidence(self, cost, prev_session, curr_session):
+        """
+        Convert matching cost to a conservative confidence score (0-100).
+
+        Conservative design:
+          - Starts at 100 and gets penalized for each risk factor
+          - Price gap is the biggest penalty
+          - Different ECN is a big penalty
+          - Score above 80 = high confidence
+          - Score 50-80 = moderate — probably right but not certain
+          - Score below 50 = low — treat with caution
+        """
+        score = 100.0
+
+        # Price penalty: -15 per bps of gap (biggest factor)
+        price_diff_bps = abs(prev_session['last_price'] - curr_session['first_price']) * 100
+        score -= 15.0 * price_diff_bps
+
+        # ECN mismatch: -25 flat penalty
+        if prev_session['ECN'] != curr_session['ECN']:
+            score -= 25.0
+
+        # Time gap: -1 per hour of difference (mild)
+        time_diff = abs(prev_session['first_post_hour'] - curr_session['first_post_hour'])
+        score -= 1.0 * time_diff
+
+        # Competition penalty: if next-best match was close in cost,
+        # this pairing is less certain. We approximate by penalizing
+        # higher absolute cost (even if it "won" the assignment).
+        score -= 0.5 * cost
+
+        # Clamp to 0-100
+        score = max(0, min(100, score))
+
+        # Conservative cap: never above 95 (we can't be 100% sure
+        # with anonymous IDs)
+        score = min(score, 95)
+
+        return round(score)
 
     def _match_cost(self, prev_session, curr_session):
         """
         Cost between a yesterday session and a today session.
         Lower = more likely same dealer.
 
-        Features:
-          - ECN match (same platform = strong signal)
-          - Price proximity (dealer offers drift gradually)
-          - Post time similarity (dealers post at similar times)
-          - Update frequency similarity
+        Features (price-dominant weighting):
+          - Price proximity (70%): yesterday's last vs today's first offer.
+            Strongest signal — dealers pick up near where they left off.
+          - ECN match (20%): same platform is a good signal.
+          - Post time similarity (5%): low weight — same dealer can post
+            at 7am one day and 10am the next.
+          - Update frequency (5%): minor tiebreaker.
         """
         cost = 0.0
 
-        # ECN match (weight: 30%)
-        ecn_penalty = 0.0 if prev_session['ECN'] == curr_session['ECN'] else 5.0
-        cost += 3.0 * ecn_penalty
-
-        # Price proximity: yesterday's last vs today's first (weight: 40%)
+        # Price proximity: yesterday's last vs today's first (weight: 70%)
         price_diff_bps = abs(prev_session['last_price'] - curr_session['first_price']) * 100
-        cost += 4.0 * price_diff_bps
+        cost += 7.0 * price_diff_bps
 
-        # Post time similarity (weight: 20%)
+        # ECN match (weight: 20%)
+        ecn_penalty = 0.0 if prev_session['ECN'] == curr_session['ECN'] else 5.0
+        cost += 2.0 * ecn_penalty
+
+        # Post time similarity (weight: 5%)
         time_diff = abs(prev_session['first_post_hour'] - curr_session['first_post_hour'])
-        cost += 2.0 * time_diff
+        cost += 0.5 * time_diff
 
-        # Update frequency (weight: 10%)
+        # Update frequency (weight: 5%)
         update_diff = abs(prev_session['num_updates'] - curr_session['num_updates'])
-        cost += 1.0 * update_diff
+        cost += 0.5 * update_diff
 
         return cost
 
@@ -388,6 +437,7 @@ class IntraDaySentiment:
         for today_id, yest_id in self.dealer_links.items():
             today_s = self.today_sessions.get(today_id, {})
             yest_s = next((s for s in self.prior_sessions if s['ECN_MSG_ID'] == yest_id), {})
+            conf = self.match_confidence.get(today_id, 0)
             rows.append({
                 'today_ECN_MSG_ID': today_id,
                 'yesterday_ECN_MSG_ID': yest_id,
@@ -396,6 +446,7 @@ class IntraDaySentiment:
                 'ECN': today_s.get('ECN', ''),
                 'yesterday_last_price': yest_s.get('last_price', ''),
                 'today_current_price': today_s.get('last_price', ''),
+                'confidence': conf,
             })
         return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -413,6 +464,7 @@ class IntraDaySentiment:
         self.today_sessions = {}
         self.ticks = []
         self.dealer_links = {}
+        self.match_confidence = {}
         self._matched_groups = {}
 
     # =================================================================

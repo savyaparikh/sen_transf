@@ -1,0 +1,47 @@
+# ===================== TRAINING =====================
+
+# ---- Step 1: build the dataset from past bids ----
+for each historical bid record:
+    X    = features of the bond + market           # sector, rating, maturity bucket,
+                                                    # liquidity, size, eval dispersion, etc.
+    ref  = reference price (BVAL / algo signal / eval)
+
+    if we WON:
+        comp_level = cover - ref                    # the competing level we beat, EXACTLY known
+        obs        = comp_level
+        censored   = FALSE
+    else:  # we LOST
+        obs        = my_bid - ref                   # we only know competition was ABOVE our bid,
+        censored   = TRUE                           # so the true competing level is right-censored here
+
+    store (X, obs, censored)
+
+
+# ---- Step 2: fit a model that predicts the DISTRIBUTION of the competing level ----
+# For each bond the model outputs two numbers: a center mu and a spread sigma.
+# We train it by maximizing a CENSORED likelihood:
+
+define loss(X, obs, censored):
+    mu, sigma = model(X)                            # predicted center & spread for THIS bond
+
+    if not censored:                                # a WIN: we saw the competing level exactly
+        # reward a distribution whose density is high at the observed cover
+        loglik = log( normal_pdf(obs, mu, sigma) )
+    else:                                           # a LOSS: competition was ABOVE our bid level
+        # reward a distribution that puts mass above our bid (P(level > obs))
+        loglik = log( 1 - normal_cdf(obs, mu, sigma) )
+
+    return -loglik                                  # we minimize negative log-likelihood
+
+fit model to minimize the average loss over all records
+# (learner can be gradient boosting / NGBoost / small NN — the censored loss is what matters)
+
+
+# ===================== PREDICTION =====================
+
+function probability_of_win(bond_features X, reference ref, my_bid):
+    mu, sigma = model(X)                            # this bond's competing-level distribution
+    my_level  = my_bid - ref                        # how aggressive my bid is vs the reference
+    z         = (my_level - mu) / sigma
+    p_win     = normal_cdf(z)                        # = Phi(z), the same step as the simple example
+    return p_win

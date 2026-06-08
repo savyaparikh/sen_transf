@@ -1,47 +1,244 @@
-# ===================== TRAINING =====================
+# Bid Win-Probability Model — Logic & Implementation Pseudocode
 
-# ---- Step 1: build the dataset from past bids ----
-for each historical bid record:
-    X    = features of the bond + market           # sector, rating, maturity bucket,
-                                                    # liquidity, size, eval dispersion, etc.
-    ref  = reference price (BVAL / algo signal / eval)
+A build-ready spec. Each block maps closely to real code (Python-flavored).
 
-    if we WON:
-        comp_level = cover - ref                    # the competing level we beat, EXACTLY known
-        obs        = comp_level
-        censored   = FALSE
-    else:  # we LOST
-        obs        = my_bid - ref                   # we only know competition was ABOVE our bid,
-        censored   = TRUE                           # so the true competing level is right-censored here
+---
 
-    store (X, obs, censored)
+## 1. What you're building
 
+For any bond, estimate the **distribution of the best competing bid** (where the competition is likely to land), then read your win probability as the share of that distribution sitting below your bid.
 
-# ---- Step 2: fit a model that predicts the DISTRIBUTION of the competing level ----
-# For each bond the model outputs two numbers: a center mu and a spread sigma.
-# We train it by maximizing a CENSORED likelihood:
+Two numbers describe the competition for each bond: a center `mu` and a spread `sigma`. A model predicts them from the bond's features. The win probability is then a single CDF lookup.
 
-define loss(X, obs, censored):
-    mu, sigma = model(X)                            # predicted center & spread for THIS bond
+---
 
-    if not censored:                                # a WIN: we saw the competing level exactly
-        # reward a distribution whose density is high at the observed cover
-        loglik = log( normal_pdf(obs, mu, sigma) )
-    else:                                           # a LOSS: competition was ABOVE our bid level
-        # reward a distribution that puts mass above our bid (P(level > obs))
-        loglik = log( 1 - normal_cdf(obs, mu, sigma) )
+## 2. The core logic
 
-    return -loglik                                  # we minimize negative log-likelihood
+Work in a **normalized level** = price minus a reference (BVAL / algo signal / eval). Higher level = more aggressive bid.
 
-fit model to minimize the average loss over all records
-# (learner can be gradient boosting / NGBoost / small NN — the censored loss is what matters)
+```
+my_level   = my_bid - reference          # how aggressive my bid is
+comp_level = competing_bid - reference    # where the competition is (random)
 
+You WIN  <=>  my_bid > competing_bid  <=>  my_level > comp_level
 
-# ===================== PREDICTION =====================
+P(win | bid) = P(comp_level < my_level)
+             = Phi( (my_level - mu) / sigma )      # Phi = standard normal CDF
+```
 
-function probability_of_win(bond_features X, reference ref, my_bid):
-    mu, sigma = model(X)                            # this bond's competing-level distribution
-    my_level  = my_bid - ref                        # how aggressive my bid is vs the reference
+Three moving parts:
+1. **mu, sigma** — the competing-level distribution for this bond (predicted from features).
+2. **Censored training** — wins give an exact `comp_level`; losses only tell you `comp_level > my_level`. Both are used.
+3. **Phi** — turns the standardized gap `(my_level - mu)/sigma` (the z-score) into the win probability.
+
+---
+
+## 3. Conventions & data schema
+
+One row per historical bid. Required fields:
+
+```
+features        # vector X: rating, sector, maturity bucket, size, liquidity,
+                #            eval dispersion (BVAL vs ICE vs algo), market regime, etc.
+reference       # the reference price you normalize against (pick ONE consistent source)
+my_bid          # the price we bid
+outcome         # WON or LOST
+cover           # best competing bid we beat        (present only when WON)
+winning_level   # the level that beat us, if known  (e.g. recovered from MSRB print on a LOSS)
+trade_date      # for walk-forward splitting
+```
+
+Tip: if you can, compute `reference`, `my_bid`, `cover` in **yield / spread (or DV01-adjusted) units** rather than dollar price, so a "0.30 concession" means the same competitiveness across the curve. The pseudocode is identical either way — only what `level` measures changes.
+
+---
+
+## 4. Step 1 — Build the training table
+
+Each record becomes a `comp_level` plus a flag for whether that level is known exactly or only bounded below.
+
+```
+def build_dataset(records):
+    rows = []
+    for r in records:
+        X   = r.features
+        ref = r.reference
+
+        if r.outcome == WON:
+            # cover IS the best competing bid -> exact observation
+            comp_level = r.cover - ref
+            is_exact   = True
+
+        elif r.outcome == LOST and r.winning_level is not None:
+            # de-censored loss: we recovered the level that beat us (e.g. MSRB match)
+            comp_level = r.winning_level - ref
+            is_exact   = True
+
+        else:  # LOST, level unknown
+            # we only know competition was ABOVE our bid -> right-censored at my_level
+            comp_level = r.my_bid - ref          # this is the LOWER BOUND, not the value
+            is_exact   = False
+
+        rows.append({X: X, level: comp_level, is_exact: is_exact, date: r.trade_date})
+    return rows
+```
+
+---
+
+## 5. Step 2 — Naive baseline (sanity check / fallback)
+
+Plain average and spread of the levels you actually observed (wins only). Fast, but biased **low and too tight** because you only see covers when competition was weak. Keep it to compare against the fitted model.
+
+```
+def naive_estimate(rows):
+    observed = [row.level for row in rows if row.is_exact]   # wins (+ de-censored losses)
+    naive_mu    = mean(observed)
+    naive_sigma = std(observed)
+    return naive_mu, naive_sigma
+    # NOTE: expect fitted_mu > naive_mu and fitted_sigma > naive_sigma
+```
+
+---
+
+## 6. Step 3 — The censored likelihood (the heart of it)
+
+This is the only part that differs from ordinary regression. An exact level contributes its **density**; a censored level contributes the **probability of being above the bound**.
+
+```
+LOG_2PI = 1.837877066
+
+def normal_logpdf(x, mu, sigma):                 # log f(x)
+    z = (x - mu) / sigma
+    return -log(sigma) - 0.5 * z * z - 0.5 * LOG_2PI
+
+def normal_logsf(x, mu, sigma):                  # log P(value > x) = log(1 - CDF)
+    z = (x - mu) / sigma
+    return standard_normal_logsf(z)              # use scipy.stats.norm.logsf(z) for stability
+
+def record_nll(mu, sigma, level, is_exact):
+    if is_exact:
+        return -normal_logpdf(level, mu, sigma)  # reward density high AT the observed level
+    else:
+        return -normal_logsf(level, mu, sigma)   # reward mass ABOVE the bound (the bid level)
+```
+
+Use `scipy.stats.norm.logpdf` / `logsf` rather than logging raw pdf/cdf — `log(1 - cdf)` underflows in the tails.
+
+---
+
+## 7. Step 4 — Fit the model
+
+The model maps features to `(mu, sigma)`. Keep `sigma > 0` with a softplus on a raw output. Train by minimizing mean censored NLL.
+
+```
+# model(X) -> (mu_raw, s_raw)
+def predict_params(model, X):
+    mu_raw, s_raw = model(X)
+    mu    = mu_raw
+    sigma = softplus(s_raw) + 1e-4               # strictly positive
+    return mu, sigma
+
+def total_loss(model, rows):
+    total = 0
+    for row in rows:
+        mu, sigma = predict_params(model, row.X)
+        total += record_nll(mu, sigma, row.level, row.is_exact)
+    return total / len(rows)
+
+# Train (autograd version — cleanest to implement, e.g. PyTorch):
+initialize model with 2 outputs (mu_raw, s_raw)
+for epoch in range(num_epochs):
+    for batch in batches(train_rows):
+        loss = total_loss(model, batch)
+        loss.backward()
+        optimizer.step(); optimizer.zero_grad()
+```
+
+Learner options, all interchangeable behind `predict_params`:
+- **Neural net / even linear**, 2 output heads, trained on the NLL above (most direct to implement).
+- **XGBoost / LightGBM AFT** (`survival:aft`): handles exact + right-censored natively; parameterizes in log-space, so feed `level` accordingly and read its predicted location/scale.
+- **Gradient boosting with a custom objective**: supply the gradient and hessian of `record_nll`. More work, best accuracy on tabular muni data.
+
+Start simple (predict `mu(X)`, hold `sigma` constant) and confirm it beats naive before letting `sigma` vary with features.
+
+---
+
+## 8. Step 5 — Predict win probability for a bid
+
+The payoff function. Same `Phi` step as the hand worked example.
+
+```
+def prob_win(model, X, reference, my_bid):
+    mu, sigma = predict_params(model, X)
+    my_level  = my_bid - reference
     z         = (my_level - mu) / sigma
-    p_win     = normal_cdf(z)                        # = Phi(z), the same step as the simple example
-    return p_win
+    return standard_normal_cdf(z)                # scipy.stats.norm.cdf(z)
+```
+
+---
+
+## 9. Step 6 — Calibrate (do not skip)
+
+Raw model probabilities are usually close but not honest out-of-sample. Fit a monotone correction on a held-out set so that "30%" really wins ~30% of the time.
+
+```
+def fit_calibrator(model, valid_rows):
+    p_raw = [prob_win(model, row.X, row.reference, row.my_bid) for row in valid_rows]
+    y     = [1 if row.outcome == WON else 0 for row in valid_rows]
+    calibrator = IsotonicRegression(out_of_bounds='clip').fit(p_raw, y)
+    return calibrator
+
+def prob_win_calibrated(model, calibrator, X, reference, my_bid):
+    return calibrator.transform([ prob_win(model, X, reference, my_bid) ])[0]
+```
+
+(Conformalized quantile regression is the stronger version if you later output full quantiles; isotonic is the simple, effective first cut.)
+
+---
+
+## 10. Step 7 — Evaluate
+
+Score the probabilities, not win/loss accuracy. Split by **date**, never randomly.
+
+```
+def evaluate(model, calibrator, test_rows):
+    p = [prob_win_calibrated(model, calibrator, r.X, r.reference, r.my_bid) for r in test_rows]
+    y = [1 if r.outcome == WON else 0 for r in test_rows]
+
+    logloss = -mean( y_i*log(p_i) + (1-y_i)*log(1-p_i) for all i )
+
+    # reliability: bin predicted prob, compare to realized win rate per bin
+    for bucket in deciles(p):
+        report( mean(p in bucket), mean(y in bucket) )   # should be close
+
+    return logloss
+
+# Walk-forward:  train on date < T,  validate/calibrate on a middle window,  test on date >= T.
+```
+
+---
+
+## 11. Step 8 (optional) — Turn it into an optimal bid
+
+Once `mu, sigma` exist, the win curve is `Phi((b - ref - mu)/sigma)`. Combine with where you can exit to pick the profit-maximizing bid.
+
+```
+def best_bid(model, X, reference, exit_value, bid_grid):
+    mu, sigma = predict_params(model, X)
+    def expected_profit(b):
+        p = standard_normal_cdf((b - reference - mu) / sigma)
+        return p * (exit_value - b)
+    return argmax(expected_profit(b) for b in bid_grid)
+    # Refinement: use E[exit_value | win] (winner's-curse adjusted), not unconditional value.
+```
+
+---
+
+## 12. Implementation notes & gotchas
+
+- **Pick one reference and stick to it** for both `my_bid` and `cover` normalization; mixing sources injects noise into `mu`.
+- **sigma must stay positive** — always pass it through softplus/exp.
+- **Numerical stability** — use library `logpdf`/`logsf`; never `log(1 - cdf)` directly.
+- **De-censoring is high value** — every loss you can match to an MSRB print (CUSIP + time + size) flips a censored row into an exact one and tightens the upper tail; route it through the `is_exact = True` branch.
+- **Selection is the whole reason for the censored term** — if you ever find yourself "just averaging the covers," you're back to the naive estimate and its low/tight bias.
+- **Validate the direction first**: on a backtest, confirm fitted `mu`/`sigma` exceed naive, and that the reliability bins line up, before trusting any single probability.
+```
